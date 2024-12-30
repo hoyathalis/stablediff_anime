@@ -2,157 +2,158 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, init_features=32, use_batchnorm=True, activation='relu', dropout_prob=0.5):
-        super(UNet, self).__init__()
-        features = init_features
-        self.use_batchnorm = use_batchnorm
-        self.activation = activation
-        self.dropout_prob = dropout_prob
-        self.encoder1 = self._block(in_channels, features, name="enc1")
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.encoder2 = self._block(features, features * 2, name="enc2")
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.encoder3 = self._block(features * 2, features * 4, name="enc3")
-        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.encoder4 = self._block(features * 4, features * 8, name="enc4")
-        self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
+class TimeEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.linear_1 = nn.Linear(dim, dim * 4)
+        self.linear_2 = nn.Linear(dim * 4, dim)
+        
+    def forward(self, x):
+        x = self.linear_1(x)
+        x = F.silu(x)
+        x = self.linear_2(x)
+        return x
 
-        self.bottleneck = self._block(features * 8, features * 16, name="bottleneck")
-
-        self.upconv4 = nn.ConvTranspose2d(
-            features * 16, features * 8, kernel_size=2, stride=2
-        )
-        self.decoder4 = self._block((features * 8) * 2, features * 8, name="dec4")
-        self.upconv3 = nn.ConvTranspose2d(
-            features * 8, features * 4, kernel_size=2, stride=2
-        )
-        self.decoder3 = self._block((features * 4) * 2, features * 4, name="dec3")
-        self.upconv2 = nn.ConvTranspose2d(
-            features * 4, features * 2, kernel_size=2, stride=2
-        )
-        self.decoder2 = self._block((features * 2) * 2, features * 2, name="dec2")
-        self.upconv1 = nn.ConvTranspose2d(
-            features * 2, features, kernel_size=2, stride=2
-        )
-        self.decoder1 = self._block(features * 2, features, name="dec1")
-
-        self.conv = nn.Conv2d(
-            in_channels=features, out_channels=out_channels, kernel_size=1
-        )
-
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, time_dim):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.time_mlp = nn.Linear(time_dim, out_channels)
+        self.transform = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+        
+        self.norm1 = nn.GroupNorm(8, out_channels)
+        self.norm2 = nn.GroupNorm(8, out_channels)
+        
     def forward(self, x, t):
-        # Incorporate t into the model (example: add t as a bias term)
-        t = t.view(t.size(0), 1, 1, 1).float()
-        t = t.expand(t.size(0), x.size(1), x.size(2), x.size(3))
-        x = x + t
+        residual = self.transform(x)
+        
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x += self.time_mlp(t)[..., None, None]
+        x = F.silu(x)
+        
+        x = self.conv2(x)
+        x = self.norm2(x)
+        x = F.silu(x)
+        
+        return x + residual
 
-        enc1 = self.encoder1(x)
-        enc2 = self.encoder2(self.pool1(enc1))
-        enc3 = self.encoder3(self.pool2(enc2))
-        enc4 = self.encoder4(self.pool3(enc3))
+class UNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=3, time_dim=256):
+        super().__init__()
+        
+        # Time embedding
+        self.time_embed = TimeEmbedding(time_dim)
+        
+        self.time_dim=time_dim
+        # Initial conv
+        self.init_conv = nn.Conv2d(in_channels, 64, 3, padding=1)
+        
+        # Encoder
+        self.down1 = ResidualBlock(64, 128, time_dim)
+        self.down2 = ResidualBlock(128, 256, time_dim)
+        self.down3 = ResidualBlock(256, 512, time_dim)
+        
+        # Bottleneck
+        self.bottleneck1 = ResidualBlock(512, 512, time_dim)
+        self.bottleneck2 = ResidualBlock(512, 512, time_dim)
+        
+        # Decoder
+        self.up1 = ResidualBlock(1024, 256, time_dim)
+        self.up2 = ResidualBlock(512, 128, time_dim)
+        self.up3 = ResidualBlock(256, 64, time_dim)
+        
+        # Final conv
+        self.final_conv = nn.Conv2d(64, out_channels, 1)
+        
+        self.pools = nn.ModuleList([
+            nn.MaxPool2d(2) for _ in range(3)
+        ])
+        
+        self.upsamples = nn.ModuleList([
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True) for _ in range(3)
+        ])
+        
+    def forward(self, x, timestep):
+        # Time embedding
+        if timestep.dim() == 1:
+            timestep = timestep.unsqueeze(-1).expand(-1, self.time_dim)
+        
+        # Time embedding
+        t = self.time_embed(timestep)        
+        # Initial conv
+        x0 = self.init_conv(x)
+        
+        # Encoder
+        x1 = self.down1(x0, t)
+        x1_pool = self.pools[0](x1)
+        
+        x2 = self.down2(x1_pool, t)
+        x2_pool = self.pools[1](x2)
+        
+        x3 = self.down3(x2_pool, t)
+        x3_pool = self.pools[2](x3)
+        
+        # Bottleneck
+        x3_pool = self.bottleneck1(x3_pool, t)
+        x3_pool = self.bottleneck2(x3_pool, t)
+        
+        # Decoder with skip connections
+        x = self.upsamples[0](x3_pool)
+        x = torch.cat([x, x3], dim=1)
+        x = self.up1(x, t)
+        
+        x = self.upsamples[1](x)
+        x = torch.cat([x, x2], dim=1)
+        x = self.up2(x, t)
+        
+        x = self.upsamples[2](x)
+        x = torch.cat([x, x1], dim=1)
+        x = self.up3(x, t)
+        
+        return self.final_conv(x)
 
-        bottleneck = self.bottleneck(self.pool4(enc4))
-
-        dec4 = self.upconv4(bottleneck)
-        dec4 = torch.cat((dec4, enc4), dim=1)
-        dec4 = self.decoder4(dec4)
-        dec3 = self.upconv3(dec4)
-        dec3 = torch.cat((dec3, enc3), dim=1)
-        dec3 = self.decoder3(dec3)
-        dec2 = self.upconv2(dec3)
-        dec2 = torch.cat((dec2, enc2), dim=1)
-        dec2 = self.decoder2(dec2)
-        dec1 = self.upconv1(dec2)
-        dec1 = torch.cat((dec1, enc1), dim=1)
-        dec1 = self.decoder1(dec1)
-
-        return torch.tanh(self.conv(dec1))
-
-    def _block(self, in_channels, features, name):
-        layers = [
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=features,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-            )
-        ]
-        if self.use_batchnorm:
-            layers.append(nn.BatchNorm2d(num_features=features))
-        layers.append(self._get_activation())
-        layers.append(nn.Dropout(self.dropout_prob))
-        layers.append(
-            nn.Conv2d(
-                in_channels=features,
-                out_channels=features,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-            )
-        )
-        if self.use_batchnorm:
-            layers.append(nn.BatchNorm2d(num_features=features))
-        layers.append(self._get_activation())
-        layers.append(nn.Dropout(self.dropout_prob))
-        return nn.Sequential(*layers)
-
-    def _get_activation(self):
-        if self.activation == 'relu':
-            return nn.ReLU(inplace=True)
-        elif self.activation == 'leaky_relu':
-            return nn.LeakyReLU(inplace=True)
-        elif self.activation == 'elu':
-            return nn.ELU(inplace=True)
-        else:
-            raise ValueError(f"Unsupported activation: {self.activation}")
-
-class NoiseScheduler:
-    def __init__(self, num_timesteps=1000, beta_start=0.001, beta_end=0.05, device='cpu'):
-        self.num_timesteps = num_timesteps
-        self.device = device
-        self.betas = torch.linspace(beta_start, beta_end, num_timesteps, device=self.device)
-        self.alphas = 1. - self.betas
-        self.alpha_cumprod = torch.cumprod(self.alphas, dim=0).to(self.device)
-
-    def add_noise(self, x, t):
-        x = x.to(self.device)
-        t = t.to(self.device)
-        noise = torch.randn_like(x, device=self.device)
-        sqrt_alpha = torch.sqrt(self.alpha_cumprod[t])[:, None, None, None]
-        sqrt_one_minus_alpha = torch.sqrt(1. - self.alpha_cumprod[t])[:, None, None, None]
-        return sqrt_alpha * x + sqrt_one_minus_alpha * noise, noise
-
-    def remove_noise(self, x, t, noise):
-        x = x.to(self.device)
-        t = t.to(self.device)
-        noise = noise.to(self.device)
-        sqrt_alpha = torch.sqrt(self.alpha_cumprod[t])[:, None, None, None]
-        sqrt_one_minus_alpha = torch.sqrt(1. - self.alpha_cumprod[t])[:, None, None, None]
-        return (x - sqrt_one_minus_alpha * noise) / sqrt_alpha
-
-    def iterative_denoise(self, x, model, steps=10):
-        denoised_x = x.clone()
-        for step in range(steps):
-            current_t = torch.full((denoised_x.size(0),), self.num_timesteps - step - 1, device=self.device, dtype=torch.long)
-            with torch.no_grad():
-                predicted_noise = model(denoised_x, current_t)
-            predicted_noise = torch.clamp(predicted_noise, min=-1.0, max=1.0)
-            denoised_x = self.remove_noise(denoised_x, current_t, predicted_noise)
-            denoised_x = torch.clamp(denoised_x, min=-1.0, max=1.0)
-        return denoised_x
+def test_unet():
+    # Test parameters
+    batch_size = 4
+    channels = 3
+    height = 64
+    width = 64
+    time_dim = 256
+    
+    # Create model
+    model = UNet(in_channels=channels, out_channels=channels, time_dim=time_dim)
+    
+    # Create dummy inputs
+    x = torch.randn(batch_size, channels, height, width)
+    t = torch.randn(batch_size, time_dim)
+    
+    # Forward pass
+    try:
+        output = model(x, t)
+        
+        # Validate output shape
+        expected_shape = (batch_size, channels, height, width)
+        assert output.shape == expected_shape, f"Expected shape {expected_shape}, got {output.shape}"
+        
+        # Validate no NaN values
+        assert not torch.isnan(output).any(), "Output contains NaN values"
+        
+        print("Model validation passed!")
+        print(f"Input shape: {x.shape}")
+        print(f"Output shape: {output.shape}")
+        
+        # Calculate number of parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Total parameters: {total_params:,}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Model validation failed: {str(e)}")
+        return False
 
 if __name__ == "__main__":
-    model = UNet(in_channels=3, out_channels=3, init_features=32)
-    noise_scheduler = NoiseScheduler(num_timesteps=1000, device='cpu')
-    x = torch.randn((1, 3, 64, 64))
-    t = torch.tensor([999])
-    noisy_x, _ = noise_scheduler.add_noise(x, t)
-    denoised_x = noise_scheduler.iterative_denoise(noisy_x, model, steps=10)
-    print(denoised_x.shape)
-# if __name__ == "__main__":
-#     model = UNet(in_channels=3, out_channels=3, init_features=32)
-#     x = torch.randn((1, 3, 64, 64))
-#     preds = model(x)
-#     print(preds.shape)
+    test_unet()
