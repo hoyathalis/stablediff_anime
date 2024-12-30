@@ -30,7 +30,7 @@ def tensor_to_image_grid(tensor_grid):
 
 def objective(trial):
     # Initialize a new wandb run for each trial
-    wandb.init(project="StableDiffusion", entity="hoyathaliaezakmi", reinit=True, name=f"lr_{trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)}_bs_{trial.suggest_categorical('batch_size', [32, 64, 128])}_epochs_{trial.suggest_int('num_epochs', 150)}_is_{trial.suggest_categorical('image_size', [64])}_if_{trial.suggest_categorical('init_features', [16, 32, 64])}_dp_{trial.suggest_uniform('dropout_prob', 0.0, 0.5)}_act_{trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'elu'])}")
+    wandb.init(project="StableDiffusion", entity="hoyathaliaezakmi", reinit=True, name=f"lr_{trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)}_bs_{trial.suggest_categorical('batch_size', [32, 64, 128])}_epochs_{trial.suggest_int('num_epochs', 100, 150)}_is_{trial.suggest_categorical('image_size', [64])}_if_{trial.suggest_categorical('init_features', [16, 32, 64])}_dp_{trial.suggest_uniform('dropout_prob', 0.0, 0.5)}_act_{trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'elu'])}")
 
     # Hyperparameters to tune
     learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
