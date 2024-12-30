@@ -35,7 +35,7 @@ def objective(trial):
     # Hyperparameters to tune
     learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
     batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
-    num_epochs = trial.suggest_int('num_epochs', 150)
+    num_epochs = trial.suggest_int('num_epochs', 100, 150)
     image_size = trial.suggest_categorical('image_size', [64])
     init_features = trial.suggest_categorical('init_features', [16, 32, 64])
     dropout_prob = trial.suggest_uniform('dropout_prob', 0.0, 0.5)
