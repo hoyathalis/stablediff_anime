@@ -1,0 +1,32 @@
+# Ignore images folder
+images/
+
+# Ignore Python-related files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.env
+*.venv
+env/
+venv/
+ENV/
+ENV.bak/
+venv.bak/
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# Ignore .pth files
+*.pth
+
+# Ignore wandb folder
+wandb/
+
+# Ignore logs folder
+logs/
+
+# Ignore generated_images folder
+generated_images/
